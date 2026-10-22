@@ -1,317 +1,197 @@
 
+#include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <DNSServer.h>
-#include <WebServer.h>
-#include <Preferences.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
+
+#include "alerts.h"
+#include "areas_data.h"
+#include "led.h"
+#include "portal.h"
+#include "settings.h"
+#include "version.h"
 
 // ──────────────────────────────────────────────
-// Hardware
+// Hardware / behaviour constants
 // ──────────────────────────────────────────────
-const int ALERT_LED_PIN = 2;          // Built-in LED on most ESP32 devkits (active HIGH)
+const int BOOT_BTN_PIN = 9;           // "BOOT" button on the C6-DevKitC-1, active LOW.
+                                      // Hold it while resetting → open the portal
+                                      // without erasing the stored configuration.
+const uint32_t WIFI_TIMEOUT_MS = 20000;   // give up joining after 20 s → portal
+const uint32_t WIFI_RETRY_MS = 15000;     // retry interval while disconnected
+const uint32_t WIFI_DOWN_TO_PORTAL_MS = 120000;  // unreachable for 2 min → portal
+const uint32_t STATUS_MS = 10000;
 
-// ──────────────────────────────────────────────
-// Network / AP
-// ──────────────────────────────────────────────
-const byte DNS_PORT = 53;
-IPAddress apIP(192, 168, 4, 1);
-DNSServer dnsServer;
-WebServer server(80);
-Preferences preferences;
+enum class State { PORTAL, WIFI_WAITING, RUNNING };
 
-// ──────────────────────────────────────────────
-// Alert API
-// ──────────────────────────────────────────────
-const char* ALERTS_URL  = "https://www.oref.org.il/WarningMessages/alert/alerts.json";
-const char* REFERER     = "https://www.oref.org.il/";
-const unsigned long POLL_INTERVAL_MS  = 5000;   // poll every 5 s
-const unsigned long BLINK_INTERVAL_MS = 400;    // LED blink speed during alert
+State state = State::PORTAL;
+uint32_t wifiStartedAt = 0;
+uint32_t disconnectedSince = 0;
+uint32_t lastWifiRetryAt = 0;
+uint32_t lastStatusAt = 0;
 
-// ──────────────────────────────────────────────
-// Runtime state
-// ──────────────────────────────────────────────
-String wifi_ssid       = "";
-String wifi_pass       = "";
-String target_location = "";   // Hebrew area name, e.g. "רמת גן"
+void startWifi() {
+  Serial.println("[wifi] connecting to '" + g_settings.ssid + "' …");
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(g_settings.ssid.c_str(), g_settings.pass.c_str());
+  wifiStartedAt = millis();
+  state = State::WIFI_WAITING;
+  led::setMode(LedMode::CONNECTING);
+}
 
-bool  isAlertActive  = false;
-bool  ledState       = false;
-unsigned long lastPollTime  = 0;
-unsigned long lastBlinkTime = 0;
+void startPortal(const char* reason) {
+  Serial.println(String("[portal] ") + reason);
+  portal::begin();
+  state = State::PORTAL;
+  led::setMode(LedMode::PORTAL);
+}
 
-// ──────────────────────────────────────────────
-// Forward declarations
-// ──────────────────────────────────────────────
-void startCaptivePortal();
-void handleRootLayout();
-void handleSaveConfig();
-void connectToWiFi();
-void pollAlerts();
-void updateLed();
-void checkAlertObject(JsonObject alert, bool& matched, bool& ended);
+void onWifiUp() {
+  Serial.println("[wifi] connected, IP " + WiFi.localIP().toString() +
+                 " RSSI " + String(WiFi.RSSI()) + " dBm");
+  alerts::begin();
+  disconnectedSince = 0;
+  lastWifiRetryAt = 0;
+  state = State::RUNNING;
+}
+
+void printStatus() {
+  Serial.print("[status] wifi=");
+  Serial.print(WiFi.status() == WL_CONNECTED ? "up" : "DOWN");
+  Serial.print(" heap=");
+  Serial.print(ESP.getFreeHeap());
+  Serial.print(" alerts=");
+  Serial.print(alerts::primaryActive() ? "PRIMARY" : "-");
+  Serial.print(alerts::secondaryActive() ? " SECONDARY" : "");
+  Serial.print(alerts::preWarningActive() ? " PRE" : "");
+  Serial.print(" | ");
+  Serial.println(alerts::status());
+}
+
+bool areaExists(const String& name) {
+  for (int i = 0; i < AREAS_COUNT; i++) {
+    if (name == AREAS[i].label) return true;
+  }
+  return false;
+}
+
+void validateAreas(const char* kind, const std::vector<String>& areas) {
+  for (const String& a : areas) {
+    if (areaExists(a)) {
+      Serial.println(String("[cfg] ") + kind + " area OK: '" + a + "'");
+    } else {
+      Serial.println(String("[cfg] WARNING: ") + kind + " '" + a +
+                     "' is NOT an official oref area label – it will never match!");
+    }
+  }
+}
+
+// Serial test console: p/s inject a fake alert through the real matching
+// code, c clears it, o reopens the portal, ? prints status.
+void handleSerial() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    switch (c) {
+      case 'p': alerts::simulatePrimary(); break;
+      case 's': alerts::simulateSecondary(); break;
+      case 'c': alerts::clearSimulation(); break;
+      case 'o': startPortal("opened by serial command"); break;
+      case '?': printStatus(); break;
+      case '\n': case '\r': case ' ': break;
+      default:
+        Serial.println("commands: p=sim primary  s=sim secondary  c=clear  o=open portal  ?=status");
+    }
+  }
+}
 
 // ══════════════════════════════════════════════
 // setup
 // ══════════════════════════════════════════════
 void setup() {
   Serial.begin(115200);
+  delay(150);
+  Serial.println();
+  Serial.println("=== Homefront Alert Lamp v" FW_VERSION " ===");
 
-  // LED
-  pinMode(ALERT_LED_PIN, OUTPUT);
-  digitalWrite(ALERT_LED_PIN, LOW);
+  cfg::load();
+  Serial.println("[cfg] " + cfg::dump());
+  validateAreas("primary", g_settings.primary);
+  validateAreas("secondary", g_settings.secondary);
 
-  // NVS
-  preferences.begin("alarm-config", false);
-  wifi_ssid       = preferences.getString("ssid",     "");
-  wifi_pass       = preferences.getString("pass",     "");
-  target_location = preferences.getString("location", "");
+  led::begin(g_settings.ledPin, g_settings.ledCount, g_settings.ledBri);
+  led::update();  // boot flash proves the LED wiring works
 
-  Serial.print("Saved location: ");
-  Serial.println(target_location);
+  pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
+  delay(20);
+  bool btnHeld = digitalRead(BOOT_BTN_PIN) == LOW;
+  if (btnHeld) Serial.println("[boot] BOOT button held");
 
-  if (wifi_ssid == "") {
-    startCaptivePortal();
+  if (!g_settings.isComplete() || btnHeld) {
+    startPortal(g_settings.isComplete() ? "opened by BOOT button"
+                                        : "first run / incomplete configuration");
   } else {
-    connectToWiFi();
+    startWifi();
   }
+
+  Serial.println("[hint] serial commands: p=sim primary alert  s=sim secondary  c=clear  o=open portal  ?=status");
 }
 
 // ══════════════════════════════════════════════
-// loop
+// loop – fully non-blocking: the LED keeps animating
+// while WiFi and HTTP do their thing.
 // ══════════════════════════════════════════════
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    // AP / captive-portal mode
-    dnsServer.processNextRequest();
-    server.handleClient();
-  } else {
-    // Station mode – poll the alert API
-    unsigned long now = millis();
-    if (now - lastPollTime >= POLL_INTERVAL_MS) {
-      lastPollTime = now;
-      pollAlerts();
-    }
-    updateLed();
+  handleSerial();
+  led::update();
+
+  if (portal::active()) {
+    portal::tick();
+    return;
   }
-}
 
-// ══════════════════════════════════════════════
-// checkAlertObject
-// Inspect one alert object: { id, cat, title, data: ["רמת גן", …] }
-// cat 13 = event ended (all-clear for listed areas).
-// ══════════════════════════════════════════════
-void checkAlertObject(JsonObject alert, bool& matched, bool& ended) {
-  JsonArray data = alert["data"].as<JsonArray>();
-  if (data.isNull()) return;
+  uint32_t now = millis();
 
-  String cat = alert["cat"].as<String>();
-  bool isEnded = (cat == "13");
+  if (state == State::WIFI_WAITING) {
+    if (WiFi.status() == WL_CONNECTED) {
+      onWifiUp();
+    } else if (now - wifiStartedAt > WIFI_TIMEOUT_MS) {
+      // Don't wipe the credentials: bring the portal up so the user can
+      // correct them (the previous firmware deleted them on failure).
+      startPortal("WiFi connection failed");
+    }
+    return;
+  }
 
-  for (JsonVariant area : data) {
-    if (area.as<String>() == target_location) {
-      if (isEnded) {
-        ended = true;
-      } else {
-        matched = true;
-      }
+  // ── RUNNING ──
+  if (state == State::RUNNING && WiFi.status() != WL_CONNECTED) {
+    if (!disconnectedSince) disconnectedSince = now;
+
+    if (now - disconnectedSince > WIFI_DOWN_TO_PORTAL_MS) {
+      startPortal("WiFi unreachable for 2 minutes");
       return;
     }
-  }
-}
 
-// ══════════════════════════════════════════════
-// pollAlerts
-// Query oref.org.il and check whether target_location
-// is listed in the current active alerts.
-// ══════════════════════════════════════════════
-void pollAlerts() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (target_location.length() == 0) return;
-
-  WiFiClientSecure client;
-  client.setInsecure();   // skip cert verification (oref uses a valid cert, but avoids needing root CA)
-
-  HTTPClient http;
-  http.begin(client, ALERTS_URL);
-  http.addHeader("Referer",           REFERER);
-  http.addHeader("X-Requested-With",  "XMLHttpRequest");
-  http.addHeader("Accept",            "application/json");
-  http.setTimeout(4000);
-
-  int code = http.GET();
-  Serial.print("[alerts] HTTP ");
-  Serial.println(code);
-
-  if (code == HTTP_CODE_OK) {
-    String payload = http.getString();
-    payload.trim();
-    Serial.print("[alerts] payload: ");
-    Serial.println(payload);
-
-    // When there are no alerts, oref returns an empty body or "{}"
-    if (payload.length() == 0 || payload == "{}") {
-      isAlertActive = false;
-      Serial.println("[alerts] No active alerts.");
-    } else {
-      StaticJsonDocument<8192> doc;
-      DeserializationError err = deserializeJson(doc, payload);
-
-      if (err) {
-        Serial.print("[alerts] JSON parse error: ");
-        Serial.println(err.c_str());
-        isAlertActive = false;
-      } else {
-        bool matched = false;
-        bool ended   = false;
-
-        if (doc.is<JsonArray>()) {
-          for (JsonObject alert : doc.as<JsonArray>()) {
-            checkAlertObject(alert, matched, ended);
-          }
-        } else if (doc.is<JsonObject>()) {
-          checkAlertObject(doc.as<JsonObject>(), matched, ended);
-        }
-
-        isAlertActive = matched && !ended;
-        Serial.print("[alerts] Match for '");
-        Serial.print(target_location);
-        Serial.print("': ");
-        if (ended && !matched) {
-          Serial.println("ended");
-        } else {
-          Serial.println(isAlertActive ? "YES – ALERT!" : "no");
-        }
-      }
+    if (now - lastWifiRetryAt > WIFI_RETRY_MS) {
+      lastWifiRetryAt = now;
+      Serial.println("[wifi] lost – reconnecting…");
+      WiFi.reconnect();
     }
+    led::setMode(LedMode::CONNECTING);
+    return;
+  }
+  disconnectedSince = 0;
+
+  alerts::tick();
+
+  if (alerts::primaryActive()) {
+    led::setMode(LedMode::ALERT_PRIMARY);
+  } else if (alerts::secondaryActive() || alerts::preWarningActive()) {
+    led::setMode(LedMode::ALERT_SECONDARY);
   } else {
-    Serial.println("[alerts] Request failed; keeping previous state.");
+    led::setMode(LedMode::OFF);
   }
 
-  http.end();
-}
-
-// ══════════════════════════════════════════════
-// updateLed
-// Blink the LED when an alert is active, turn it
-// off when everything is calm.
-// ══════════════════════════════════════════════
-void updateLed() {
-  if (isAlertActive) {
-    unsigned long now = millis();
-    if (now - lastBlinkTime >= BLINK_INTERVAL_MS) {
-      lastBlinkTime = now;
-      ledState = !ledState;
-      digitalWrite(ALERT_LED_PIN, ledState ? HIGH : LOW);
-    }
-  } else {
-    if (ledState) {
-      ledState = false;
-      digitalWrite(ALERT_LED_PIN, LOW);
-    }
-  }
-}
-
-// ══════════════════════════════════════════════
-// startCaptivePortal
-// ══════════════════════════════════════════════
-void startCaptivePortal() {
-  Serial.println("Starting Access Point configuration portal…");
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP("Homefront-Alert-Lamp");
-
-  dnsServer.start(DNS_PORT, "*", apIP);
-
-  server.on("/",     handleRootLayout);
-  server.on("/save", handleSaveConfig);
-  server.onNotFound(handleRootLayout);
-  server.begin();
-  Serial.println("Captive portal running at 192.168.4.1");
-}
-
-// ══════════════════════════════════════════════
-// handleRootLayout – captive portal HTML
-// ══════════════════════════════════════════════
-void handleRootLayout() {
-  String html =
-    "<!DOCTYPE html><html lang='he'><head>"
-    "<meta charset='UTF-8'>"
-    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-    "<title>Alert Lamp Setup</title>"
-    "<style>"
-    "  body{font-family:sans-serif;padding:24px;direction:rtl;}"
-    "  label{display:block;margin-top:12px;font-weight:bold;}"
-    "  input{width:100%;padding:10px;margin-top:4px;box-sizing:border-box;font-size:16px;}"
-    "  small{color:#555;}"
-    "  button{margin-top:16px;width:100%;padding:12px;font-size:16px;"
-    "         background:#e63946;color:#fff;border:none;border-radius:4px;cursor:pointer;}"
-    "</style></head><body>"
-    "<h2>הגדרת מנורת ההתרעה</h2>"
-    "<form action='/save' method='POST'>"
-    "  <label>שם רשת WiFi</label>"
-    "  <input type='text'     name='ssid' autocomplete='off'>"
-    "  <label>סיסמת WiFi</label>"
-    "  <input type='password' name='pass'>"
-    "  <label>שם היישוב / האזור שלך (בעברית)</label>"
-    "  <input type='text'     name='location' placeholder='לדוגמה: רמת גן'>"
-    "  <small>הקלד את שם האזור בדיוק כפי שמופיע באתר פיקוד העורף.</small>"
-    "  <button type='submit'>שמור והתחבר</button>"
-    "</form></body></html>";
-
-  server.send(200, "text/html; charset=utf-8", html);
-}
-
-// ══════════════════════════════════════════════
-// handleSaveConfig – persist credentials to NVS
-// ══════════════════════════════════════════════
-void handleSaveConfig() {
-  if (server.hasArg("ssid") && server.hasArg("pass") && server.hasArg("location")) {
-    wifi_ssid       = server.arg("ssid");
-    wifi_pass       = server.arg("pass");
-    target_location = server.arg("location");
-
-    preferences.putString("ssid",     wifi_ssid);
-    preferences.putString("pass",     wifi_pass);
-    preferences.putString("location", target_location);
-
-    Serial.print("Config saved. Location: ");
-    Serial.println(target_location);
-
-    server.send(200, "text/html; charset=utf-8",
-      "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
-      "<body><h3>ההגדרות נשמרו. מתחבר…</h3></body></html>");
-    delay(2000);
-    ESP.restart();
-  } else {
-    server.send(400, "text/plain", "Bad Request – missing fields");
-  }
-}
-
-// ══════════════════════════════════════════════
-// connectToWiFi
-// ══════════════════════════════════════════════
-void connectToWiFi() {
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(wifi_ssid);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
-
-  int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 20) {
-    delay(500);
-    Serial.print(".");
-    tries++;
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nConnection failed – reverting to hotspot mode.");
-    preferences.putString("ssid", "");   // clear bad credentials
-    startCaptivePortal();
-  } else {
-    Serial.println("\nConnected!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+  if (now - lastStatusAt >= STATUS_MS) {
+    lastStatusAt = now;
+    printStatus();
   }
 }
