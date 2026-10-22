@@ -170,6 +170,12 @@ void doCheck() {
   client.setInsecure();  // TODO: pin GitHub's root CA
 
   HTTPClient http;
+  if (!http.begin(client, API_URL)) {  // BUG-FIX: begin() must precede GET()
+    fails++;
+    lastError = "release lookup setup failed";
+    Serial.println("[ota] check failed: " + lastError);
+    return;
+  }
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(META_TIMEOUT_MS);
   http.setUserAgent("oref-alert-lamp/" FW_VERSION);
