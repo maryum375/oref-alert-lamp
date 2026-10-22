@@ -18,6 +18,8 @@ struct Settings {
   int ledCount = 1;
   int ledBri   = 40;    // percent, clamped by a power budget for long strips
 
+  int updateIntervalSec = 120;  // GitHub release check interval; 0 = never
+
   bool hasWifi() const { return ssid.length() > 0; }
   bool hasAreas() const { return !primary.empty() || !secondary.empty(); }
   bool isComplete() const { return hasWifi() && hasAreas(); }

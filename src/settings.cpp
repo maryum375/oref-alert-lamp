@@ -56,12 +56,16 @@ void load() {
   g_settings.ledPin    = prefs.getInt("led_pin", g_settings.ledPin);
   g_settings.ledCount  = prefs.getInt("led_count", g_settings.ledCount);
   g_settings.ledBri    = prefs.getInt("led_bri", g_settings.ledBri);
+  g_settings.updateIntervalSec = prefs.getInt("upd_int", g_settings.updateIntervalSec);
   prefs.end();
 
   if (g_settings.ledCount < 1) g_settings.ledCount = 1;
   if (g_settings.ledCount > 1024) g_settings.ledCount = 1024;
   if (g_settings.ledBri < 1) g_settings.ledBri = 1;
   if (g_settings.ledBri > 100) g_settings.ledBri = 100;
+  if (g_settings.updateIntervalSec < 0) g_settings.updateIntervalSec = 0;
+  if (g_settings.updateIntervalSec > 0 && g_settings.updateIntervalSec < 60)
+    g_settings.updateIntervalSec = 60;  // GitHub allows 60 unauthenticated calls/hour
 }
 
 void save() {
@@ -73,6 +77,7 @@ void save() {
   prefs.putInt("led_pin", g_settings.ledPin);
   prefs.putInt("led_count", g_settings.ledCount);
   prefs.putInt("led_bri", g_settings.ledBri);
+  prefs.putInt("upd_int", g_settings.updateIntervalSec);
   prefs.end();
 }
 

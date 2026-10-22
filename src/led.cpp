@@ -102,6 +102,7 @@ void update() {
   uint32_t key = 0;
   uint32_t color = 0;
   int walk = -1;  // TEST mode uses a moving pixel instead of a uniform fill
+  bool perPixel = false;  // UPDATING paints each pixel individually
 
   switch (m) {
     case LedMode::OFF:
@@ -145,6 +146,13 @@ void update() {
       }
       break;
     }
+
+    case LedMode::UPDATING:
+      // rainbow sweeping around the ring (~1 revolution / second);
+      // a single pixel just cycles through the hues.
+      perPixel = true;
+      key = (8u << 28) | (now / 40);
+      break;
   }
 
   if (g_shownOnce && key == g_lastKey) return;
@@ -154,6 +162,14 @@ void update() {
   if (m == LedMode::TEST && walk >= 0) {
     strip->clear();
     strip->setPixelColor(walk, strip->Color(255, 255, 255));
+    strip->show();
+  } else if (perPixel) {
+    uint16_t phase = (uint16_t)(now * 65);  // wraps every ~1005 ms
+    strip->clear();
+    for (int i = 0; i < g_count; i++) {
+      uint16_t hue = phase + (uint16_t)((uint64_t)i * 65536 / g_count);
+      strip->setPixelColor(i, strip->ColorHSV(hue));
+    }
     strip->show();
   } else {
     paintAll(color);

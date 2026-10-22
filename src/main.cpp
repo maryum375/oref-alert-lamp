@@ -6,6 +6,7 @@
 #include "alerts.h"
 #include "areas_data.h"
 #include "led.h"
+#include "ota.h"
 #include "portal.h"
 #include "settings.h"
 #include "version.h"
@@ -102,10 +103,11 @@ void handleSerial() {
       case 's': alerts::simulateSecondary(); break;
       case 'c': alerts::clearSimulation(); break;
       case 'o': startPortal("opened by serial command"); break;
+      case 'u': ota::checkNow(); Serial.println("[ota] update check requested"); break;
       case '?': printStatus(); break;
       case '\n': case '\r': case ' ': break;
       default:
-        Serial.println("commands: p=sim primary  s=sim secondary  c=clear  o=open portal  ?=status");
+        Serial.println("commands: p=sim primary  s=sim secondary  c=clear  o=open portal  u=check update  ?=status");
     }
   }
 }
@@ -139,7 +141,7 @@ void setup() {
     startWifi();
   }
 
-  Serial.println("[hint] serial commands: p=sim primary alert  s=sim secondary  c=clear  o=open portal  ?=status");
+  Serial.println("[hint] serial commands: p=sim primary alert  s=sim secondary  c=clear  o=open portal  u=check update  ?=status");
 }
 
 // ══════════════════════════════════════════════
@@ -152,6 +154,7 @@ void loop() {
 
   if (portal::active()) {
     portal::tick();
+    ota::tick(false);   // manual "check now" only; never auto-install while configuring
     return;
   }
 
@@ -189,7 +192,8 @@ void loop() {
 
   portal::runtimeTick();
   alerts::tick();
-
+  ota::tick();   // may block for the duration of a download, then reboot
+                 // (it drives LedMode::UPDATING itself and aborts on alerts)
   if (alerts::primaryActive()) {
     led::setMode(LedMode::ALERT_PRIMARY);
   } else if (alerts::secondaryActive() || alerts::preWarningActive()) {

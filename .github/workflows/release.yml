@@ -1,0 +1,56 @@
+name: Build firmware release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Check tag matches FW_VERSION
+        run: |
+          VER=$(sed -n 's/.*#define FW_VERSION "\(.*\)".*/\1/p' src/version.h)
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "FW_VERSION=$VER tag=$TAG"
+          if [ "$VER" != "$TAG" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match FW_VERSION $VER in src/version.h"
+            exit 1
+          fi
+
+      - name: Build
+        run: pio run -e esp32-c6-devkitc-1
+
+      - name: Stage release asset
+        run: |
+          mkdir -p dist
+          cp .pio/build/esp32-c6-devkitc-1/firmware.bin dist/firmware.bin
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/firmware.bin
+          generate_release_notes: true

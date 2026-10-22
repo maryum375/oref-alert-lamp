@@ -1,5 +1,9 @@
 #pragma once
 
-// Firmware version – shown on the portal status page.
-// (Later: compared against the latest GitHub Release for OTA updates.)
-#define FW_VERSION "0.2.0"
+// Firmware version – shown on the portal status page and compared against
+// the latest GitHub Release tag (leading 'v' optional) by the OTA updater.
+#define FW_VERSION "0.3.0"
+
+// GitHub repository (owner/name) whose releases are checked for updates.
+// Must contain release assets named *.bin (uploaded by .github/workflows).
+#define OTA_REPO "maryum375/oref-alert-lamp"

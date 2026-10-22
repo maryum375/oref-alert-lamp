@@ -8,6 +8,7 @@
 #include "alerts.h"
 #include "areas_data.h"
 #include "led.h"
+#include "ota.h"
 #include "settings.h"
 #include "version.h"
 
@@ -57,6 +58,24 @@ void buildAreasJson() {
   areasJson += "]}";
 }
 
+// WebServer handles ONE client at a time and, while waiting for the first
+// request bytes, holds it for HTTP_MAX_DATA_WAIT (5 s) — long enough to stall
+// every other connection. Browsers routinely open parallel sockets that send
+// nothing for a while (preconnect), which used to make the page "hang forever".
+// Close such idle sockets after a short grace period instead.
+void dropIdleClient(WebServer& srv, uint32_t& idleSince) {
+  NetworkClient& c = srv.client();
+  if (c.connected() && c.available() == 0) {
+    if (!idleSince) idleSince = millis();
+    else if (millis() - idleSince > 500) {  // real requests arrive in ~1-5 ms
+      c.stop();
+      idleSince = 0;
+    }
+  } else {
+    idleSince = 0;
+  }
+}
+
 // ──────────────────────────────────────────────
 // Routes
 // ──────────────────────────────────────────────
@@ -98,6 +117,7 @@ String buildStatusJson() {
   doc["led_pin"] = g_settings.ledPin;
   doc["led_count"] = g_settings.ledCount;
   doc["led_bri"] = g_settings.ledBri;
+  doc["update_interval"] = g_settings.updateIntervalSec;
 
   JsonArray p = doc["primary"].to<JsonArray>();
   for (const String& a : g_settings.primary) p.add(a);
@@ -111,6 +131,10 @@ String buildStatusJson() {
   String a = alerts::status();
   JsonDocument ad;
   if (!deserializeJson(ad, a)) doc["alerts"] = ad.as<JsonVariant>();
+
+  String o = ota::status();
+  JsonDocument od;
+  if (!deserializeJson(od, o)) doc["ota"] = od.as<JsonVariant>();
 
   String out;
   serializeJson(doc, out);
@@ -139,6 +163,11 @@ void handleSave() {
   if (web.hasArg("led_pin")) g_settings.ledPin = constrain(web.arg("led_pin").toInt(), 0, 48);
   if (web.hasArg("led_count")) g_settings.ledCount = constrain(web.arg("led_count").toInt(), 1, 1024);
   if (web.hasArg("led_bri")) g_settings.ledBri = constrain(web.arg("led_bri").toInt(), 1, 100);
+  if (web.hasArg("upd_int")) {
+    int secs = constrain(web.arg("upd_int").toInt(), 0, 86400);
+    if (secs > 0 && secs < 60) secs = 60;  // GitHub rate limit: 60 calls/hour
+    g_settings.updateIntervalSec = secs;
+  }
 
   if (!g_settings.hasWifi()) {
     web.send(400, "text/plain; charset=utf-8", "חסר שם רשת WiFi");
@@ -178,6 +207,13 @@ void handleTestFor(WebServer& srv) {
 }
 
 void handleTest() { handleTestFor(web); }
+
+void handleUpdCheck() {
+  // Queue the check; the portal loop's ota::tick(false) runs it right after
+  // this response is sent, so the browser isn't left hanging on a download.
+  ota::checkNow();
+  web.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
+}
 
 void handleReset() {
   cfg::factoryReset();
@@ -268,7 +304,19 @@ summary{cursor:pointer;font-weight:700;padding:5px 2px}
 </section>
 
 <section>
-  <h2>4. שמירה</h2>
+  <h2>4. עדכוני קושחה (GitHub)</h2>
+  <div class="grid">
+    <div><label>בדיקת עדכון כל (שניות, 0 = כבוי)</label><input type="number" id="upd_int" min="0" max="86400"></div>
+  </div>
+  <div class="hint">המכשיר בודק את הגרסאות האחרונות ב־GitHub ומתקין גרסה חדשה אוטומטית (נוריות קשת בענן בזמן ההתקנה). מינימום 60 שנייה. לא מתקין בזמן התרעה פעילה.</div>
+  <div class="actions">
+    <button class="ghost" onclick="checkUpd()">בדוק עכשיו</button>
+  </div>
+  <div class="msg" id="updmsg"></div>
+</section>
+
+<section>
+  <h2>5. שמירה</h2>
   <div class="actions">
     <button onclick="save()">שמור והפעל מחדש</button>
     <button class="danger" onclick="resetCfg()">איפוס הגדרות</button>
@@ -291,6 +339,7 @@ async function init(){
     $('#ver').textContent='v'+(st.version||'?');
     $('#ssid').value=st.ssid||'';
     $('#led_pin').value=st.led_pin; $('#led_count').value=st.led_count; $('#led_bri').value=st.led_bri;
+    $('#upd_int').value=st.update_interval;
     AREAS={p:new Set(st.primary||[]),s:new Set(st.secondary||[])};
   }catch(e){msg('טעינת סטטוס נכשלה','err');}
   await loadAreas();
@@ -375,7 +424,8 @@ async function save(){
   const body=new URLSearchParams({
     ssid:$('#ssid').value, pass:$('#pass').value,
     areas:JSON.stringify(sel),
-    led_pin:$('#led_pin').value, led_count:$('#led_count').value, led_bri:$('#led_bri').value
+    led_pin:$('#led_pin').value, led_count:$('#led_count').value, led_bri:$('#led_bri').value,
+    upd_int:$('#upd_int').value
   });
   msg('שומר…');
   try{
@@ -388,6 +438,26 @@ async function save(){
 async function resetCfg(){
   if(!confirm('למחוק את כל ההגדרות?'))return;
   try{await fetch('/reset',{method:'POST'}); msg('נמחק – מפעיל מחדש…');}catch(e){}
+}
+async function checkUpd(){
+  const el=$('#updmsg'); el.textContent='בודק גרסאות ב־GitHub…'; el.className='msg';
+  try{
+    await fetch('/updcheck',{method:'POST'});
+    // The check runs right after this response; poll for its result.
+    for(let i=0;i<8;i++){
+      await new Promise(r=>setTimeout(r,1500));
+      const st=await jget('/status'); const o=st.ota||{};
+      if(o.updating){ el.textContent='מתקין גרסה '+o.latest+'…'; return; }
+      if(o.checks>0 && o.checked_ms_ago<10000){
+        if(o.latest && o.latest!==o.current && !o.last_error)
+          el.textContent='זמין גרסה '+o.latest+' (נוכחי '+o.current+') – מתקין…';
+        else if(o.last_error) el.textContent='שגיאה: '+o.last_error;
+        else el.textContent='מעודכן: '+o.current+' הוא הגרסה האחרונה';
+        return;
+      }
+    }
+    el.textContent='הבדיקה נמשכת זמן מה – אפשר לבדוק שוב';
+  }catch(e){el.textContent='הבדיקה לא יצאה לפועל'; el.className='msg err';}
 }
 async function showStatus(){
   try{
@@ -514,6 +584,7 @@ void begin() {
   web.on("/save", HTTP_POST, handleSave);
   web.on("/test", handleTest);
   web.on("/reset", HTTP_POST, handleReset);
+  web.on("/updcheck", HTTP_POST, handleUpdCheck);
   web.onNotFound(handleNotFound);
   web.begin();
 
@@ -525,6 +596,8 @@ void tick() {
   if (!running) return;
   dns.processNextRequest();
   web.handleClient();
+  static uint32_t idleSince = 0;
+  dropIdleClient(web, idleSince);
 }
 
 bool active() { return running; }
@@ -551,6 +624,8 @@ void beginRuntime() {
 void runtimeTick() {
   if (!runtimeOn) return;
   runtimeWeb.handleClient();
+  static uint32_t idleSince = 0;
+  dropIdleClient(runtimeWeb, idleSince);
   if (wantPortal) {
     wantPortal = false;
     begin();  // switch over to the configuration portal

@@ -16,6 +16,7 @@ enum class LedMode {
   ALERT_PRIMARY,    // fast red strobe      – main areas
   ALERT_SECONDARY,  // slow amber breathing – secondary areas
   TEST,             // white pixel walk     – wiring / pixel-count check
+  UPDATING,         // spinning rainbow     – firmware update in progress
 };
 
 namespace led {
