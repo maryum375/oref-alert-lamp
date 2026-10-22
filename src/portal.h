@@ -19,4 +19,10 @@ void begin();
 void tick();
 bool active();
 
+// Read-only status interface, available while the lamp is running on WiFi:
+//   http://alertlamp.local  (mDNS) or http://<ip>/
+String statusJson();
+void beginRuntime();
+void runtimeTick();
+
 }  // namespace portal

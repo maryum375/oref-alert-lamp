@@ -1,5 +1,6 @@
 
 #include <Arduino.h>
+#include <ESPmDNS.h>
 #include <WiFi.h>
 
 #include "alerts.h"
@@ -52,6 +53,12 @@ void onWifiUp() {
   disconnectedSince = 0;
   lastWifiRetryAt = 0;
   state = State::RUNNING;
+
+  portal::beginRuntime();
+  if (MDNS.begin("alertlamp")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println("[mdns] http://alertlamp.local/");
+  }
 }
 
 void printStatus() {
@@ -180,6 +187,7 @@ void loop() {
   }
   disconnectedSince = 0;
 
+  portal::runtimeTick();
   alerts::tick();
 
   if (alerts::primaryActive()) {

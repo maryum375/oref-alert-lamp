@@ -14,8 +14,11 @@
 namespace {
 
 DNSServer dns;
-WebServer web(80);
+WebServer web(80);        // configuration portal
+WebServer runtimeWeb(80); // read-only status UI while running on WiFi
 bool running = false;
+bool runtimeOn = false;
+bool wantPortal = false;
 
 const char* AP_SSID = "Homefront-Alert-Lamp";
 IPAddress apIP(192, 168, 4, 1);
@@ -81,7 +84,13 @@ void handleScan() {
   web.send(200, "application/json; charset=utf-8", out);
 }
 
+String buildStatusJson();
+
 void handleStatus() {
+  web.send(200, "application/json; charset=utf-8", buildStatusJson());
+}
+
+String buildStatusJson() {
   JsonDocument doc;
   doc["version"] = FW_VERSION;
   doc["ssid"] = g_settings.ssid;
@@ -105,7 +114,7 @@ void handleStatus() {
 
   String out;
   serializeJson(doc, out);
-  web.send(200, "application/json; charset=utf-8", out);
+  return out;
 }
 
 void handleSave() {
@@ -147,26 +156,28 @@ void handleSave() {
   ESP.restart();
 }
 
-void handleTest() {
+void handleTestFor(WebServer& srv) {
   // Apply whatever is currently typed in the LED fields, so wiring can be
   // tested before (or without) saving and rebooting.
-  if (web.hasArg("pin") && web.hasArg("count") && web.hasArg("bri")) {
-    int pin = constrain(web.arg("pin").toInt(), 0, 48);
-    int count = constrain(web.arg("count").toInt(), 1, 1024);
-    int bri = constrain(web.arg("bri").toInt(), 1, 100);
+  if (srv.hasArg("pin") && srv.hasArg("count") && srv.hasArg("bri")) {
+    int pin = constrain(srv.arg("pin").toInt(), 0, 48);
+    int count = constrain(srv.arg("count").toInt(), 1, 1024);
+    int bri = constrain(srv.arg("bri").toInt(), 1, 100);
     if (pin != g_settings.ledPin || count != g_settings.ledCount || bri != g_settings.ledBri) {
       led::begin(pin, count, bri);  // re-init the driver with the form's values
     }
   }
 
-  String m = web.arg("m");
+  String m = srv.arg("m");
   if (m == "primary") led::overrideFor(LedMode::ALERT_PRIMARY, 6000);
   else if (m == "secondary") led::overrideFor(LedMode::ALERT_SECONDARY, 6000);
   else if (m == "pixels") led::overrideFor(LedMode::TEST, 8000);
   else if (m == "off") led::overrideFor(LedMode::OFF, 3000);
   else led::overrideFor(LedMode::PORTAL, 3000);
-  web.send(200, "application/json", "{\"ok\":true}");
+  srv.send(200, "application/json", "{\"ok\":true}");
 }
+
+void handleTest() { handleTestFor(web); }
 
 void handleReset() {
   cfg::factoryReset();
@@ -393,6 +404,91 @@ void handleRoot() {
   web.send_P(200, "text/html; charset=utf-8", PAGE_HTML);
 }
 
+// ── runtime status UI (served while the lamp runs on WiFi) ──
+const char RUNTIME_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
+<html lang="he"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>מנורת התרעה</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,"Segoe UI",Arial,sans-serif;margin:0;background:#f5f6f8;color:#1b1f24;direction:rtl}
+main{max-width:560px;margin:0 auto;padding:16px}
+h1{font-size:19px;margin:0 0 12px}
+.card{background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:12px;margin-bottom:10px}
+.k{color:#66707b;font-size:13px}
+.v{font-size:17px;font-weight:700;margin-top:2px}
+.alert{color:#c1121f}
+.calm{color:#0a7a32}
+button{padding:10px 14px;border:0;border-radius:6px;background:#2f6fed;color:#fff;font-size:15px;cursor:pointer}
+.danger{background:#e63946}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+pre{font-size:12px;background:#fff;border:1px solid #e6e9ee;border-radius:8px;padding:8px;overflow:auto;direction:ltr;text-align:left}
+</style></head><body><main>
+<h1>מנורת התרעה <span id="ver" style="color:#66707b"></span></h1>
+
+<div class="card"><div class="k">מצב התרעה</div><div class="v" id="al">…</div></div>
+<div class="card"><div class="k">WiFi</div><div class="v" id="wifi">…</div></div>
+
+<div class="card"><div class="k">בדיקת נורית</div>
+ <div class="actions">
+  <button onclick="t('primary')">דפוס ראשי</button>
+  <button onclick="t('secondary')">דפוס משני</button>
+  <button onclick="t('pixels')">פיקסלים</button>
+  <button onclick="t('off')">כבה</button>
+ </div>
+</div>
+
+<div class="card"><div class="k">פעולות</div>
+ <div class="actions"><button class="danger" onclick="openPortal()">פתיחת עמוד הגדרה</button></div>
+</div>
+
+<pre id="raw">…</pre>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const jget=async u=>(await fetch(u,{cache:'no-store'})).json();
+async function refresh(){
+  try{
+    const s=await jget('/status');
+    $('#ver').textContent='v'+s.version;
+    const a=s.alerts||{};
+    let txt='רגוע';
+    if(a.primary) txt='התרעה – אזור ראשי';
+    else if(a.secondary) txt='התרעה – אזור משני';
+    else if(a.prewarning) txt='התרעה מקדימה';
+    if(a.sim) txt+=' (בדיקה)';
+    $('#al').textContent=txt;
+    $('#al').className='v '+(a.primary||a.secondary||a.prewarning?'alert':'calm');
+    $('#wifi').textContent=s.ssid+' · '+s.ip+' · '+s.rssi+' dBm';
+    $('#raw').textContent=JSON.stringify(s,null,1);
+  }catch(e){ $('#al').textContent='אין תשובה מהמכשיר'; }
+}
+async function t(m){ try{ await fetch('/test?m='+m); }catch(e){} refresh(); }
+async function openPortal(){
+  if(!confirm('לפתוח את עמוד ההגדרה?')) return;
+  try{ await fetch('/portal',{method:'POST'}); }catch(e){}
+  setTimeout(()=>location.reload(),4000);
+}
+refresh(); setInterval(refresh,5000);
+</script>
+</body></html>)HTML";
+
+void handleRuntimeRoot() {
+  runtimeWeb.send_P(200, "text/html; charset=utf-8", RUNTIME_HTML);
+}
+
+void handleRuntimeStatus() {
+  runtimeWeb.send(200, "application/json; charset=utf-8", buildStatusJson());
+}
+
+void handleRuntimeTest() { handleTestFor(runtimeWeb); }
+
+void handleRuntimePortal() {
+  wantPortal = true;  // actually switch in runtimeTick(), not inside a handler
+  runtimeWeb.send(200, "text/plain; charset=utf-8", "switching to portal");
+}
+
 }  // namespace
 
 // ──────────────────────────────────────────────
@@ -401,6 +497,7 @@ void handleRoot() {
 namespace portal {
 
 void begin() {
+  if (runtimeOn) { runtimeWeb.stop(); runtimeOn = false; }
   Serial.println("[portal] starting configuration access point…");
   WiFi.mode(WIFI_AP_STA);  // STA stays available for /scan
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
@@ -431,5 +528,33 @@ void tick() {
 }
 
 bool active() { return running; }
+
+void beginRuntime() {
+  if (runtimeOn) return;
+  if (running) { dns.stop(); web.stop(); running = false; }
+
+  static bool routesDone = false;
+  if (!routesDone) {
+    runtimeWeb.on("/", handleRuntimeRoot);
+    runtimeWeb.on("/status", handleRuntimeStatus);
+    runtimeWeb.on("/test", handleRuntimeTest);
+    runtimeWeb.on("/portal", HTTP_POST, handleRuntimePortal);
+    routesDone = true;
+  }
+
+  runtimeWeb.begin();
+  runtimeOn = true;
+  Serial.println("[web] status page: http://alertlamp.local/ (or http://" +
+                 WiFi.localIP().toString() + "/)");
+}
+
+void runtimeTick() {
+  if (!runtimeOn) return;
+  runtimeWeb.handleClient();
+  if (wantPortal) {
+    wantPortal = false;
+    begin();  // switch over to the configuration portal
+  }
+}
 
 }  // namespace portal
