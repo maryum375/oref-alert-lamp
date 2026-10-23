@@ -294,7 +294,11 @@ void checkNow() { forceCheck = true; }
 String status() {
   JsonDocument doc;
   doc["current"] = FW_VERSION;
-  doc["latest"] = latestTag;
+  // expose the tag without the leading 'v' so UIs can compare it with
+  // FW_VERSION directly (the download URL keeps the raw tag)
+  String tagShown = latestTag;
+  if (tagShown.startsWith("v") || tagShown.startsWith("V")) tagShown = tagShown.substring(1);
+  doc["latest"] = tagShown;
   doc["interval_s"] = g_settings.updateIntervalSec;
   doc["checks"] = checks;
   doc["fails"] = fails;
