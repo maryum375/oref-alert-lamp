@@ -9,6 +9,7 @@ namespace {
 Preferences prefs;
 const char* NS = "alert-lamp";
 const char SEP = '\n';
+const char* LEVEL_NAMES[4] = {"ERROR", "WARN", "INFO", "DEBUG"};
 
 String join(const std::vector<String>& v) {
   String out;
@@ -57,6 +58,7 @@ void load() {
   g_settings.ledCount  = prefs.getInt("led_count", g_settings.ledCount);
   g_settings.ledBri    = prefs.getInt("led_bri", g_settings.ledBri);
   g_settings.updateIntervalSec = prefs.getInt("upd_int", g_settings.updateIntervalSec);
+  g_settings.logLevel          = prefs.getInt("loglvl", g_settings.logLevel);
   prefs.end();
 
   if (g_settings.ledCount < 1) g_settings.ledCount = 1;
@@ -66,6 +68,8 @@ void load() {
   if (g_settings.updateIntervalSec < 0) g_settings.updateIntervalSec = 0;
   if (g_settings.updateIntervalSec > 0 && g_settings.updateIntervalSec < 60)
     g_settings.updateIntervalSec = 60;  // GitHub allows 60 unauthenticated calls/hour
+  if (g_settings.logLevel < 0) g_settings.logLevel = 0;
+  if (g_settings.logLevel > 3) g_settings.logLevel = 3;
 }
 
 void save() {
@@ -78,6 +82,7 @@ void save() {
   prefs.putInt("led_count", g_settings.ledCount);
   prefs.putInt("led_bri", g_settings.ledBri);
   prefs.putInt("upd_int", g_settings.updateIntervalSec);
+  prefs.putInt("loglvl", g_settings.logLevel);
   prefs.end();
 }
 
@@ -98,11 +103,14 @@ void factoryReset() {
 }
 
 String dump() {
+  int ll = g_settings.logLevel;
+  if (ll < 0) ll = 0;
+  if (ll > 3) ll = 3;
   String out = "ssid='" + g_settings.ssid + "' primary=" + String(g_settings.primary.size()) +
                " secondary=" + String(g_settings.secondary.size()) + " led=GPIO" +
                String(g_settings.ledPin) + "x" + String(g_settings.ledCount) + "@" +
-               String(g_settings.ledBri) + "%";
-  return out;
+               String(g_settings.ledBri) + "% log=" + LEVEL_NAMES[ll];
+  return out;  // never includes the password
 }
 
 }  // namespace cfg

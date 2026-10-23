@@ -6,6 +6,7 @@
 #include "alerts.h"
 #include "areas_data.h"
 #include "led.h"
+#include "log.h"
 #include "ota.h"
 #include "portal.h"
 #include "settings.h"
@@ -22,6 +23,15 @@ const uint32_t WIFI_RETRY_MS = 15000;     // retry interval while disconnected
 const uint32_t WIFI_DOWN_TO_PORTAL_MS = 120000;  // unreachable for 2 min → portal
 const uint32_t STATUS_MS = 10000;
 
+// Log tags (see log.h) – the bracketed prefix of the old Serial.println calls
+static const char* TAG_BOOT = "boot";
+static const char* TAG_CFG = "cfg";
+static const char* TAG_HINT = "hint";
+static const char* TAG_MDNS = "mdns";
+static const char* TAG_PORTAL = "portal";
+static const char* TAG_STATUS = "status";
+static const char* TAG_WIFI = "wifi";
+
 enum class State { PORTAL, WIFI_WAITING, RUNNING };
 
 State state = State::PORTAL;
@@ -31,7 +41,7 @@ uint32_t lastWifiRetryAt = 0;
 uint32_t lastStatusAt = 0;
 
 void startWifi() {
-  Serial.println("[wifi] connecting to '" + g_settings.ssid + "' …");
+  LOGI(TAG_WIFI, "connecting to '" + g_settings.ssid + "' …");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(g_settings.ssid.c_str(), g_settings.pass.c_str());
@@ -41,15 +51,15 @@ void startWifi() {
 }
 
 void startPortal(const char* reason) {
-  Serial.println(String("[portal] ") + reason);
+  LOGI(TAG_PORTAL, String(reason));
   portal::begin();
   state = State::PORTAL;
   led::setMode(LedMode::PORTAL);
 }
 
 void onWifiUp() {
-  Serial.println("[wifi] connected, IP " + WiFi.localIP().toString() +
-                 " RSSI " + String(WiFi.RSSI()) + " dBm");
+  LOGI(TAG_WIFI, "connected, IP " + WiFi.localIP().toString() +
+                     " RSSI " + String(WiFi.RSSI()) + " dBm");
   alerts::begin();
   disconnectedSince = 0;
   lastWifiRetryAt = 0;
@@ -58,21 +68,17 @@ void onWifiUp() {
   portal::beginRuntime();
   if (MDNS.begin("alertlamp")) {
     MDNS.addService("http", "tcp", 80);
-    Serial.println("[mdns] http://alertlamp.local/");
+    LOGI(TAG_MDNS, "http://alertlamp.local/");
   }
 }
 
 void printStatus() {
-  Serial.print("[status] wifi=");
-  Serial.print(WiFi.status() == WL_CONNECTED ? "up" : "DOWN");
-  Serial.print(" heap=");
-  Serial.print(ESP.getFreeHeap());
-  Serial.print(" alerts=");
-  Serial.print(alerts::primaryActive() ? "PRIMARY" : "-");
-  Serial.print(alerts::secondaryActive() ? " SECONDARY" : "");
-  Serial.print(alerts::preWarningActive() ? " PRE" : "");
-  Serial.print(" | ");
-  Serial.println(alerts::status());
+  LOGI(TAG_STATUS,
+       String("wifi=") + (WiFi.status() == WL_CONNECTED ? "up" : "DOWN") +
+           " heap=" + ESP.getFreeHeap() +
+           " alerts=" + (alerts::primaryActive() ? "PRIMARY" : "-") +
+           (alerts::secondaryActive() ? " SECONDARY" : "") +
+           (alerts::preWarningActive() ? " PRE" : "") + " | " + alerts::status());
 }
 
 bool areaExists(const String& name) {
@@ -85,10 +91,10 @@ bool areaExists(const String& name) {
 void validateAreas(const char* kind, const std::vector<String>& areas) {
   for (const String& a : areas) {
     if (areaExists(a)) {
-      Serial.println(String("[cfg] ") + kind + " area OK: '" + a + "'");
+      LOGD(TAG_CFG, String(kind) + " area OK: '" + a + "'");
     } else {
-      Serial.println(String("[cfg] WARNING: ") + kind + " '" + a +
-                     "' is NOT an official oref area label – it will never match!");
+      LOGW(TAG_CFG, String("WARNING: ") + kind + " '" + a +
+                        "' is NOT an official oref area label – it will never match!");
     }
   }
 }
@@ -122,7 +128,8 @@ void setup() {
   Serial.println("=== Homefront Alert Lamp v" FW_VERSION " ===");
 
   cfg::load();
-  Serial.println("[cfg] " + cfg::dump());
+  logger::begin();  // pick up the persisted log capture level (NVS)
+  LOGI(TAG_CFG, cfg::dump());
   validateAreas("primary", g_settings.primary);
   validateAreas("secondary", g_settings.secondary);
 
@@ -132,7 +139,7 @@ void setup() {
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
   delay(20);
   bool btnHeld = digitalRead(BOOT_BTN_PIN) == LOW;
-  if (btnHeld) Serial.println("[boot] BOOT button held");
+  if (btnHeld) LOGI(TAG_BOOT, "BOOT button held");
 
   if (!g_settings.isComplete() || btnHeld) {
     startPortal(g_settings.isComplete() ? "opened by BOOT button"
@@ -141,7 +148,9 @@ void setup() {
     startWifi();
   }
 
-  Serial.println("[hint] serial commands: p=sim primary alert  s=sim secondary  c=clear  o=open portal  u=check update  ?=status");
+  LOGI(TAG_HINT,
+       "serial commands: p=sim primary alert  s=sim secondary  c=clear  "
+       "o=open portal  u=check update  ?=status");
 }
 
 // ══════════════════════════════════════════════
@@ -182,12 +191,13 @@ void loop() {
 
     if (now - lastWifiRetryAt > WIFI_RETRY_MS) {
       lastWifiRetryAt = now;
-      Serial.println("[wifi] lost – reconnecting…");
+      LOGW(TAG_WIFI, "lost – reconnecting…");
       WiFi.reconnect();
     }
     led::setMode(LedMode::CONNECTING);
     return;
   }
+  if (disconnectedSince) LOGI(TAG_WIFI, "reconnected, IP " + WiFi.localIP().toString());
   disconnectedSince = 0;
 
   portal::runtimeTick();

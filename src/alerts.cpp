@@ -5,12 +5,16 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
+#include "log.h"
 #include "settings.h"
 
 namespace {
 
 const char* ALERTS_URL = "https://www.oref.org.il/WarningMessages/alert/alerts.json";
 const char* REFERER    = "https://www.oref.org.il/";
+
+const char* TAG = "alerts";
+const char* TAG_SIM = "sim";
 
 const uint32_t POLL_MS = 3000;     // oref's own app samples every 2 s
 const uint32_t HTTP_TIMEOUT_MS = 3500;
@@ -76,6 +80,8 @@ void poll() {
 
   if (code != HTTP_CODE_OK) {
     failCount++;
+    LOGW(TAG, "poll failed: HTTP " + String(code) + " (" + http.errorToString(code) +
+                  "), keeping previous state");
     http.end();
     return;  // keep previous state
   }
@@ -85,6 +91,8 @@ void poll() {
 
   lastPayloadBytes = payload.length();
   lastSuccessAt = millis();
+  LOGD(TAG, "poll ok: " + String(lastPayloadBytes) + " bytes in " + String(lastLatency) +
+                " ms");
   processPayload(payload);
 }
 
@@ -131,6 +139,8 @@ void processPayload(String payload) {
       lastParseOk = false;
       failCount++;
       // keep the previous state: a malformed body must not clear a real alert
+      LOGE(TAG, String("payload is not valid JSON (") + err.c_str() +
+                    ") – keeping previous state");
       return;
     }
     lastParseOk = true;
@@ -145,10 +155,25 @@ void processPayload(String payload) {
     }
   }
 
+  bool wasP = alerts::primaryActive(), wasS = alerts::secondaryActive(),
+       wasPre = alerts::preWarningActive();
+
   uint32_t now = millis();
   if (p) { havePrimary = true; lastPrimaryAt = now; }
   if (s) { haveSecondary = true; lastSecondaryAt = now; }
   preWarning = pre;
+
+  // one line per state transition (not per poll)
+  if (!wasP && alerts::primaryActive())
+    LOGI(TAG, "PRIMARY alert matched: '" + lastPrimaryArea + "'");
+  else if (wasP && !alerts::primaryActive())
+    LOGI(TAG, "PRIMARY alert cleared");
+  if (!wasS && alerts::secondaryActive())
+    LOGI(TAG, "SECONDARY alert matched: '" + lastSecondaryArea + "'");
+  else if (wasS && !alerts::secondaryActive())
+    LOGI(TAG, "SECONDARY alert cleared");
+  if (!wasPre && alerts::preWarningActive()) LOGI(TAG, "pre-warning started");
+  else if (wasPre && !alerts::preWarningActive()) LOGI(TAG, "pre-warning cleared");
 }
 
 }  // namespace
@@ -185,24 +210,24 @@ bool simulating() { return (int32_t)(millis() - simUntil) < 0; }
 
 void simulatePrimary() {
   if (!g_settings.primary.size()) {
-    Serial.println("[sim] no PRIMARY area configured – nothing to match");
+    LOGW(TAG_SIM, "no PRIMARY area configured – nothing to match");
     return;
   }
   String area = g_settings.primary[0];
   simUntil = millis() + 12000;
-  Serial.println("[sim] injecting primary alert for '" + area + "'");
+  LOGI(TAG_SIM, "injecting primary alert for '" + area + "'");
   processPayload("[{\"id\":\"sim\",\"cat\":\"1\",\"title\":\"TEST\",\"data\":[\"" + area +
                  "\"],\"desc\":\"\"}]");
 }
 
 void simulateSecondary() {
   if (!g_settings.secondary.size()) {
-    Serial.println("[sim] no SECONDARY area configured – nothing to match");
+    LOGW(TAG_SIM, "no SECONDARY area configured – nothing to match");
     return;
   }
   String area = g_settings.secondary[0];
   simUntil = millis() + 12000;
-  Serial.println("[sim] injecting secondary alert for '" + area + "'");
+  LOGI(TAG_SIM, "injecting secondary alert for '" + area + "'");
   processPayload("[{\"id\":\"sim\",\"cat\":\"1\",\"title\":\"TEST\",\"data\":[\"" + area +
                  "\"],\"desc\":\"\"}]");
 }
@@ -214,7 +239,7 @@ void clearSimulation() {
   preWarning = false;
   lastPrimaryArea = "";
   lastSecondaryArea = "";
-  Serial.println("[sim] cleared");
+  LOGI(TAG_SIM, "cleared");
 }
 
 String status() {

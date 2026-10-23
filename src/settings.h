@@ -20,6 +20,10 @@ struct Settings {
 
   int updateIntervalSec = 120;  // GitHub release check interval; 0 = never
 
+  // Log capture filter for the /dev page ring buffer (serial always gets
+  // everything): 0 = ERROR, 1 = WARN, 2 = INFO (default), 3 = DEBUG.
+  int logLevel = 2;
+
   bool hasWifi() const { return ssid.length() > 0; }
   bool hasAreas() const { return !primary.empty() || !secondary.empty(); }
   bool isComplete() const { return hasWifi() && hasAreas(); }

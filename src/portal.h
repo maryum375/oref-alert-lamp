@@ -23,10 +23,13 @@
 //   /savenet      POST: persist WiFi credentials and restart
 //   /saveareas    POST: persist areas (applied live)
 //   /saveled      POST: persist brightness (applied live)
-//   /savedev      POST: persist pin/count/brightness/update-interval (dev)
+//   /savedev      POST: persist pin/count/brightness/update-interval/log-level (dev)
 //   /sim          POST: alert simulation through the real matching code (dev)
 //   /restart      POST: reboot (dev)
 //   /test         force an LED pattern for a few seconds
+//   /logs.json    live log: lines with seq > ?since=N (0/absent = whole buffer)
+//   /logs.txt     live log: whole buffer as a downloadable text file
+//   /logclear     POST: drop every captured log line (dev)
 //   /reset        POST: factory reset and restart
 //   /updcheck     POST: queue an immediate firmware update check
 // ──────────────────────────────────────────────

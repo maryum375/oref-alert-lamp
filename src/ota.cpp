@@ -8,6 +8,7 @@
 
 #include "alerts.h"
 #include "led.h"
+#include "log.h"
 #include "settings.h"
 #include "version.h"
 
@@ -16,6 +17,8 @@ namespace {
 // GitHub "get the latest published release" endpoint. Unauthenticated calls
 // are rate-limited to 60/hour/IP, hence the 60 s floor on the interval.
 const char* API_URL = "https://api.github.com/repos/" OTA_REPO "/releases/latest";
+
+const char* TAG = "ota";
 
 const uint32_t META_TIMEOUT_MS = 10000;   // release metadata fetch
 const uint32_t DL_TIMEOUT_MS = 60000;     // whole .bin download
@@ -112,7 +115,7 @@ bool downloadAndFlash(const String& url, int expectedSize, String& err) {
       uint32_t pct = (uint32_t)(total - remaining) * 100 / total;
       if (pct >= lastPct + 10) {
         lastPct = pct - pct % 10;
-        Serial.println("[ota] download " + String(pct) + "%");
+        LOGD(TAG, "download " + String(pct) + "%");
       }
     } else {
       if (millis() - lastByteAt > IDLE_TIMEOUT_MS) {
@@ -159,7 +162,7 @@ bool downloadAndFlash(const String& url, int expectedSize, String& err) {
     return false;
   }
 
-  Serial.println("[ota] image written OK – rebooting into v" FW_VERSION "→new build");
+  LOGI(TAG, "image written OK – rebooting into v" FW_VERSION "→new build");
   return true;
 }
 
@@ -173,7 +176,7 @@ void doCheck() {
   if (!http.begin(client, API_URL)) {  // BUG-FIX: begin() must precede GET()
     fails++;
     lastError = "release lookup setup failed";
-    Serial.println("[ota] check failed: " + lastError);
+    LOGE(TAG, "check failed: " + lastError);
     return;
   }
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
@@ -190,7 +193,7 @@ void doCheck() {
     lastError = "release lookup HTTP " + String(code) + " (" +
                 http.errorToString(code) + ")";
     if (code == 403 || code == 429) lastError += " (rate limited?)";
-    Serial.println("[ota] check failed: " + lastError);
+    LOGE(TAG, "check failed: " + lastError);
     http.end();
     return;
   }
@@ -202,7 +205,7 @@ void doCheck() {
   if (deserializeJson(doc, payload)) {
     fails++;
     lastError = "release metadata not valid JSON";
-    Serial.println("[ota] check failed: " + lastError);
+    LOGE(TAG, "check failed: " + lastError);
     return;
   }
 
@@ -210,15 +213,15 @@ void doCheck() {
   if (!tag.length()) {
     fails++;
     lastError = "no published release found";
-    Serial.println("[ota] check failed: " + lastError);
+    LOGE(TAG, "check failed: " + lastError);
     return;
   }
   latestTag = tag;
 
   int cmp = cmpVersion(tag, FW_VERSION);
-  Serial.println("[ota] latest release " + tag + " vs current v" FW_VERSION " → " +
-                 (cmp > 0 ? "UPDATE AVAILABLE" : cmp == 0 ? "up to date" : "older than local build") +
-                 " (" + String(millis() - t0) + " ms)");
+  LOGI(TAG, "latest release " + tag + " vs current v" FW_VERSION " → " +
+                (cmp > 0 ? "UPDATE AVAILABLE" : cmp == 0 ? "up to date" : "older than local build") +
+                " (" + String(millis() - t0) + " ms)");
   if (cmp <= 0) {
     lastError = "";
     return;   // nothing to do
@@ -228,7 +231,7 @@ void doCheck() {
   if (alerts::primaryActive() || alerts::secondaryActive() ||
       alerts::preWarningActive() || alerts::simulating()) {
     lastError = "update deferred – alert active";
-    Serial.println("[ota] deferring install while an alert is active");
+    LOGW(TAG, "deferring install while an alert is active");
     return;
   }
 
@@ -246,22 +249,23 @@ void doCheck() {
   if (!url.length()) {
     fails++;
     lastError = "release " + tag + " has no .bin asset";
+    LOGE(TAG, lastError);
     return;
   }
 
-  Serial.println("[ota] installing " + tag + " (" + String(assetSize) + " bytes)…");
+  LOGI(TAG, "installing " + tag + " (" + String(assetSize) + " bytes)…");
   String err;
   if (downloadAndFlash(url, assetSize, err)) {
     // Leave the rainbow on briefly so the final state is visible, then boot.
     for (int i = 0; i < 40; i++) { led::update(); delay(25); }
-    Serial.println("[ota] restarting…");
+    LOGI(TAG, "restarting…");
     delay(150);
     ESP.restart();
   }
   fails++;
   lastError = err;
   led::setMode(LedMode::OFF);
-  Serial.println("[ota] update failed: " + err);
+  LOGE(TAG, "update failed: " + err);
 }
 
 }  // namespace

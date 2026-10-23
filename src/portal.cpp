@@ -8,6 +8,7 @@
 #include "alerts.h"
 #include "areas_data.h"
 #include "led.h"
+#include "log.h"
 #include "ota.h"
 #include "settings.h"
 #include "version.h"
@@ -23,6 +24,10 @@ bool wantPortal = false;
 
 const char* AP_SSID = "Homefront-Alert-Lamp";
 IPAddress apIP(192, 168, 4, 1);
+
+// Log tags (see log.h)
+const char* TAG = "portal";
+const char* TAG_WEB = "web";
 
 String areasJson;  // built once in begin(): {"d":[districts],"a":[[d,"label"],…]}
 
@@ -118,6 +123,7 @@ String buildStatusJson() {
   doc["led_count"] = g_settings.ledCount;
   doc["led_bri"] = g_settings.ledBri;
   doc["update_interval"] = g_settings.updateIntervalSec;
+  doc["log_level"] = g_settings.logLevel;
   doc["heap"] = ESP.getFreeHeap();
   doc["uptime_s"] = millis() / 1000;
 
@@ -156,7 +162,7 @@ void handleConnect() {
   // (the password fields are never pre-filled in the UI).
   if (!pass.length() && ssid == g_settings.ssid && g_settings.hasWifi())
     pass = g_settings.pass;
-  Serial.println("[portal] trying to join '" + ssid + "' …");
+  LOGI(TAG, "trying to join '" + ssid + "' …");
   WiFi.mode(WIFI_AP_STA);  // the AP stays up so the page keeps answering
   WiFi.begin(ssid.c_str(), pass.c_str());
   web.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
@@ -189,7 +195,7 @@ void handleSave() {
   }
 
   cfg::save();
-  Serial.println("[portal] saved: " + cfg::dump());
+  LOGI(TAG, "saved: " + cfg::dump());
 
   web.send(200, "text/html; charset=utf-8",
            "<!DOCTYPE html><html lang='he'><head><meta charset='utf-8'></head>"
@@ -214,7 +220,7 @@ void handleSaveNet() {
   if (pass.length()) g_settings.pass = pass;
   else if (web.hasArg("clearpass")) g_settings.pass = "";
   cfg::save();
-  Serial.println("[portal] wifi settings saved: " + cfg::dump());
+  LOGI(TAG, "wifi settings saved: " + cfg::dump());
 
   web.send(200, "text/html; charset=utf-8",
            "<!DOCTYPE html><html lang='he'><head><meta charset='utf-8'></head>"
@@ -237,7 +243,7 @@ void handleSaveAreas() {
     }
   }
   cfg::save();
-  Serial.println("[portal] areas saved: " + cfg::dump());
+  LOGI(TAG, "areas saved: " + cfg::dump());
   web.send(200, "text/plain; charset=utf-8", "נשמר");
 }
 
@@ -246,11 +252,11 @@ void handleSaveLed() {
   if (web.hasArg("bri")) g_settings.ledBri = constrain(web.arg("bri").toInt(), 1, 100);
   cfg::save();
   led::begin(g_settings.ledPin, g_settings.ledCount, g_settings.ledBri);
-  Serial.println("[portal] led settings saved: " + cfg::dump());
+  LOGI(TAG, "led settings saved: " + cfg::dump());
   web.send(200, "text/plain; charset=utf-8", "נשמר");
 }
 
-// ── dev page: hardware + update-interval settings, applied live ──
+// ── dev page: hardware + update-interval + log-level settings, applied live ──
 void handleSaveDev() {
   if (web.hasArg("pin")) g_settings.ledPin = constrain(web.arg("pin").toInt(), 0, 48);
   if (web.hasArg("count")) g_settings.ledCount = constrain(web.arg("count").toInt(), 1, 1024);
@@ -260,9 +266,13 @@ void handleSaveDev() {
     if (secs > 0 && secs < 60) secs = 60;  // GitHub rate limit: 60 calls/hour
     g_settings.updateIntervalSec = secs;
   }
+  if (web.hasArg("loglevel")) {
+    g_settings.logLevel = constrain(web.arg("loglevel").toInt(), 0, 3);
+    logger::setLevel((logger::Level)g_settings.logLevel);  // apply live, NVS via cfg::save()
+  }
   cfg::save();
   led::begin(g_settings.ledPin, g_settings.ledCount, g_settings.ledBri);
-  Serial.println("[portal] dev settings saved: " + cfg::dump());
+  LOGI(TAG, "dev settings saved: " + cfg::dump());
   web.send(200, "text/plain; charset=utf-8", "נשמר");
 }
 
@@ -280,6 +290,29 @@ void handleRestart() {
   web.send(200, "text/plain; charset=utf-8", "restarting");
   delay(300);
   ESP.restart();
+}
+
+// ── dev page: live log – lines captured since ?since=N (0/absent = all) ──
+void handleLogsJson() {
+  uint32_t since = web.hasArg("since") ? (uint32_t)web.arg("since").toInt() : 0;
+  String out;
+  uint32_t dropped = 0;
+  logger::since(since, out, dropped);
+  web.send(200, "application/json; charset=utf-8", out);
+}
+
+// ── dev page: live log – download the whole buffer as a text file ──
+void handleLogsTxt() {
+  String out;
+  logger::toText(out);
+  web.sendHeader("Content-Disposition", "attachment; filename=alert-lamp.log");
+  web.send(200, "text/plain; charset=utf-8", out);
+}
+
+// ── dev page: live log – drop every captured line ──
+void handleLogClear() {
+  logger::clear();
+  web.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
 }
 
 void handleTestFor(WebServer& srv) {
@@ -351,6 +384,7 @@ input[type=range]{padding:0}
 button{padding:10px 14px;border:0;border-radius:6px;background:#2f6fed;color:#fff;font-size:15px;cursor:pointer}
 button:disabled{opacity:.5}
 .ghost{background:#e9edf2;color:#222}
+a.ghost{display:inline-block;padding:10px 14px;border-radius:6px;background:#e9edf2;color:#222;font-size:15px;text-decoration:none}
 .danger{background:#e63946}
 .grid{display:flex;gap:8px}.grid>div{flex:1}
 #list{max-height:52vh;overflow:auto;border:1px solid #e6e9ee;border-radius:8px;padding:6px;background:#fbfcfd}
@@ -785,6 +819,25 @@ const char DEV_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 </section>
 
 <section>
+ <h2>לוג חי</h2>
+ <label>רמת תיעוד (נשמרת במכשיר)</label>
+ <select id="loglvl" onchange="saveDev()">
+  <option value="0">ERROR</option>
+  <option value="1">WARN</option>
+  <option value="2">INFO</option>
+  <option value="3">DEBUG</option>
+ </select>
+ <div class="actions">
+  <button class="ghost" id="pauseBtn" onclick="togglePause()">השהיה</button>
+  <button class="ghost" onclick="clearLog()">ניקוי</button>
+  <a class="ghost" href="/logs.txt" download="alert-lamp.log">הורדה</a>
+ </div>
+ <pre id="logview" style="max-height:340px"></pre>
+ <div class="hint" id="logstat"></div>
+ <div class="msg" id="gmsg"></div>
+</section>
+
+<section>
  <h2>פעולות</h2>
  <div class="actions">
   <button class="ghost" onclick="restart()">הפעלה מחדש</button>
@@ -804,9 +857,10 @@ async function refresh(){
     const st=await jget('/status');
     $('#ver').textContent='v'+st.version;
     $('#raw').textContent=JSON.stringify(st,null,1);
-    if(!($('#pin').matches(':focus')||$('#count').matches(':focus')||$('#bri').matches(':focus')||$('#upd_int').matches(':focus'))){
+    if(!($('#pin').matches(':focus')||$('#count').matches(':focus')||$('#bri').matches(':focus')||$('#upd_int').matches(':focus')||$('#loglvl').matches(':focus'))){
       $('#pin').value=st.led_pin;$('#count').value=st.led_count;$('#bri').value=st.led_bri;
       $('#upd_int').value=st.update_interval;
+      if(typeof st.log_level==='number')$('#loglvl').value=st.log_level;
     }
     const o=st.ota||{};
     if(o.updating)$('#otainfo').textContent='מתקין גרסה '+o.latest+'…';
@@ -818,10 +872,47 @@ async function t(m){try{await fetch('/test?m='+m+'&pin='+$('#pin').value+'&count
 async function sim(m){try{await fetch('/sim',{method:'POST',body:jurl({m})});}catch(e){}}
 async function saveDev(){
   try{
-    const r=await fetch('/savedev',{method:'POST',body:jurl({pin:$('#pin').value,count:$('#count').value,bri:$('#bri').value,upd_int:$('#upd_int').value})});
+    const r=await fetch('/savedev',{method:'POST',body:jurl({pin:$('#pin').value,count:$('#count').value,bri:$('#bri').value,upd_int:$('#upd_int').value,loglevel:$('#loglvl').value})});
     const t=r.ok?'נשמר':'השמירה נכשלה';
-    msg($('#dmsg'),t,!r.ok);msg($('#umsg'),t,!r.ok);
+    msg($('#dmsg'),t,!r.ok);msg($('#umsg'),t,!r.ok);msg($('#gmsg'),t,!r.ok);
   }catch(e){msg($('#dmsg'),'שגיאה בשמירה','err');}
+}
+
+// ── live log: 1 s short-poll of /logs.json?since=<lastSeq> ──
+let lastSeq=0,logPaused=false;
+function logLineText(l){return '['+l.t+'ms] '+l.lv+' '+(l.tag?l.tag+': ':'')+l.msg;}
+async function pollLog(){
+  if(logPaused)return;
+  try{
+    const d=await jget('/logs.json?since='+lastSeq);
+    if(typeof d.seq==='number')lastSeq=d.seq;
+    const v=$('#logview');
+    const atBottom=v.scrollTop+v.clientHeight>=v.scrollHeight-4;
+    if(d.dropped>0){
+      const dr=document.createElement('div');
+      dr.textContent='… '+d.dropped+' שורות נמחקו מהמאגר …';
+      v.appendChild(dr);
+    }
+    (d.lines||[]).forEach(l=>{
+      const div=document.createElement('div');
+      div.textContent=logLineText(l);
+      v.appendChild(div);
+    });
+    while(v.childNodes.length>300)v.removeChild(v.firstChild);
+    if(atBottom)v.scrollTop=v.scrollHeight;
+    $('#logstat').textContent='שורות: '+v.childNodes.length+' · מספר אחרון: '+lastSeq;
+  }catch(e){}
+}
+function togglePause(){
+  logPaused=!logPaused;
+  $('#pauseBtn').textContent=logPaused?'המשך':'השהיה';
+  if(!logPaused)pollLog();
+}
+async function clearLog(){
+  try{await fetch('/logclear',{method:'POST'});}catch(e){}
+  $('#logview').textContent='';
+  lastSeq=0;
+  $('#logstat').textContent='';
 }
 async function updcheck(){
   msg($('#umsg'),'בודק…');
@@ -850,6 +941,7 @@ async function doReset(){
   try{await fetch('/reset',{method:'POST'});}catch(e){}
 }
 refresh();setInterval(refresh,3000);
+pollLog();setInterval(pollLog,1000);
 </script>
 </body></html>)HTML";
 
@@ -966,7 +1058,7 @@ namespace portal {
 
 void begin() {
   if (runtimeOn) { runtimeWeb.stop(); runtimeOn = false; }
-  Serial.println("[portal] starting configuration access point…");
+  LOGI(TAG, "starting configuration access point…");
   WiFi.mode(WIFI_AP_STA);  // STA stays available for /scan and /connect
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(AP_SSID);
@@ -983,12 +1075,15 @@ void begin() {
   web.on("/areas.json", handleAreas);
   web.on("/scan.json", handleScan);
   web.on("/status", handleStatus);
+  web.on("/logs.json", handleLogsJson);
+  web.on("/logs.txt", handleLogsTxt);
   web.on("/connect", HTTP_POST, handleConnect);
   web.on("/save", HTTP_POST, handleSave);
   web.on("/savenet", HTTP_POST, handleSaveNet);
   web.on("/saveareas", HTTP_POST, handleSaveAreas);
   web.on("/saveled", HTTP_POST, handleSaveLed);
   web.on("/savedev", HTTP_POST, handleSaveDev);
+  web.on("/logclear", HTTP_POST, handleLogClear);
   web.on("/sim", HTTP_POST, handleSim);
   web.on("/restart", HTTP_POST, handleRestart);
   web.on("/test", handleTest);
@@ -998,7 +1093,7 @@ void begin() {
   web.begin();
 
   running = true;
-  Serial.println("[portal] AP '" + String(AP_SSID) + "' up, http://192.168.4.1/");
+  LOGI(TAG, "AP '" + String(AP_SSID) + "' up, http://192.168.4.1/");
 }
 
 void tick() {
@@ -1013,7 +1108,12 @@ bool active() { return running; }
 
 void beginRuntime() {
   if (runtimeOn) return;
-  if (running) { dns.stop(); web.stop(); running = false; }
+  if (running) {
+    dns.stop();
+    web.stop();
+    running = false;
+    LOGI(TAG, "configuration portal closed");
+  }
 
   static bool routesDone = false;
   if (!routesDone) {
@@ -1026,8 +1126,8 @@ void beginRuntime() {
 
   runtimeWeb.begin();
   runtimeOn = true;
-  Serial.println("[web] status page: http://alertlamp.local/ (or http://" +
-                 WiFi.localIP().toString() + "/)");
+  LOGI(TAG_WEB, "status page: http://alertlamp.local/ (or http://" +
+                    WiFi.localIP().toString() + "/)");
 }
 
 void runtimeTick() {
