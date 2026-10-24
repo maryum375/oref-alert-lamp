@@ -432,38 +432,44 @@ function msg(el,t,err){el.textContent=t||'';el.className='msg'+(err?' err':'');}
 function jurl(d){return new URLSearchParams(d).toString();}
 
 // ── official oref areas list ──
-let AREAS={p:new Set(),s:new Set()};
+let SELMAP=new Map(); // label→'p'|'s'|'' (persistent source of truth, survives re-renders)
 async function loadAreas(box){
   try{
     const st=await jget('/status');
-    AREAS={p:new Set(st.primary||[]),s:new Set(st.secondary||[])};
+    SELMAP=new Map();
+    for(const a of st.primary||[]) SELMAP.set(a,'p');
+    for(const a of st.secondary||[]) SELMAP.set(a,'s');
   }catch(e){}
   try{
-    AREAS.list=await jget('/areas.json');
+    SELMAP.list=await jget('/areas.json');
     renderAreas(box,'');
     markSelection();
   }catch(e){box.textContent='טעינת האזורים נכשלה';}
-  return AREAS;
+  return SELMAP;
 }
 function renderAreas(box,q){
-  if(!AREAS||!AREAS.list)return;
+  if(!SELMAP||!SELMAP.list)return;
   box.innerHTML='';
   let shown=0;
-  AREAS.list.d.forEach((d,di)=>{
+  SELMAP.list.d.forEach((d,di)=>{
     const items=[];
-    for(const a of AREAS.list.a){ if(a[0]!==di)continue; if(q&&a[1].indexOf(q)<0)continue; items.push(a[1]); }
+    for(const a of SELMAP.list.a){ if(a[0]!==di)continue; if(q&&a[1].indexOf(q)<0)continue; items.push(a[1]); }
     if(!items.length)return;
     shown+=items.length;
     const det=document.createElement('details');
     const sm=document.createElement('summary'); sm.textContent=d+' ('+items.length+')';
     det.appendChild(sm);
     for(const label of items){
-      const row=document.createElement('label'); row.className='row';
+      const row=document.createElement('div'); row.className='row';
       const cb=document.createElement('input'); cb.type='checkbox'; cb.dataset.l=label;
       const sp=document.createElement('span'); sp.textContent=label;
-      const sel=document.createElement('select');
-      sel.innerHTML='<option value="">—</option><option value="p">ראשי</option><option value="s">משני</option>';
-      row.appendChild(cb); row.appendChild(sp); row.appendChild(sel);
+      const sl=document.createElement('select');
+      sl.innerHTML='<option value="">—</option><option value="p">ראשי</option><option value="s">משני</option>';
+      // checkbox+span wrapped in a label for tap-to-toggle; select is a sibling
+      // outside the inner label so clicking the select does NOT toggle the checkbox
+      // (mobile‑safe – no label‑forwarding).
+      const lbl=document.createElement('label'); lbl.appendChild(cb); lbl.appendChild(sp);
+      row.appendChild(lbl); row.appendChild(sl);
       det.appendChild(row);
     }
     box.appendChild(det);
@@ -473,34 +479,32 @@ function renderAreas(box,q){
 function markSelection(){
   $$('#list input[type=checkbox]').forEach(cb=>{
     const l=cb.dataset.l;
-    const sel=cb.parentElement.querySelector('select');
-    if(AREAS.p.has(l)){cb.checked=true;sel.value='p';}
-    else if(AREAS.s.has(l)){cb.checked=true;sel.value='s';}
+    const sel=cb.closest('.row')?.querySelector('select');
+    if(SELMAP.has(l)){
+      cb.checked=true;
+      if(sel)sel.value=SELMAP.get(l);
+    }else{
+      cb.checked=false;
+      if(sel)sel.value='';
+    }
   });
 }
 function selected(){
   const p=[],s=[];
-  $$('#list input[type=checkbox]:checked').forEach(cb=>{
-    const v=cb.parentElement.querySelector('select').value;
-    if(v==='p')p.push(cb.dataset.l); else if(v==='s')s.push(cb.dataset.l);
-  });
+  SELMAP.forEach((v,l)=>{if(v==='p')p.push(l);else if(v==='s')s.push(l);});
   return {p,s};
 }
 function selectAllVisible(on){
   $$('#list input[type=checkbox]').forEach(cb=>{
     cb.checked=on;
-    if(on&&!cb.parentElement.querySelector('select').value)
-      cb.parentElement.querySelector('select').value='p';
-  });
-  syncSel();
-}
-function syncSel(){ // keep AREAS.p/s in step with the DOM so re-renders keep work
-  AREAS.p=new Set();AREAS.s=new Set();
-  $$('#list input[type=checkbox]:checked').forEach(cb=>{
-    const v=cb.parentElement.querySelector('select').value;
-    if(v==='p')AREAS.p.add(cb.dataset.l); else if(v==='s')AREAS.s.add(cb.dataset.l);
+    if(on){
+      const v=SELMAP.get(cb.dataset.l)||'p';
+      const sel=cb.closest('.row')?.querySelector('select');
+      if(sel)sel.value=v;
+    }
   });
 }
+// syncSel removed – SELMAP is the single source of truth, independent of DOM.
 
 // ── wifi scan ──
 async function scanWifi(selEl,msgEl){
