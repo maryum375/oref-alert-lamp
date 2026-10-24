@@ -17,7 +17,12 @@ namespace {
 
 DNSServer dns;
 WebServer web(80);        // configuration portal
-WebServer runtimeWeb(80); // read-only status UI while running on WiFi
+WebServer runtimeWeb(80); // status/settings UI while running on WiFi
+// The same zero-arg handlers are registered on BOTH servers (so /settings,
+// /dev and the live log also answer while the lamp is running); they reply
+// on g_srv, the server that is currently dispatching. tick()/runtimeTick()
+// and the registration helpers re-point it before use.
+WebServer* g_srv = &web;
 bool running = false;
 bool runtimeOn = false;
 bool wantPortal = false;
@@ -257,6 +262,8 @@ void handleSaveLed() {
 }
 
 // ── dev page: hardware + update-interval + log-level settings, applied live ──
+// Uses (*g_srv) instead of the global `web` so it works on whichever server
+// is currently active (portal or runtime).
 void handleSaveDev() {
   if (web.hasArg("pin")) g_settings.ledPin = constrain(web.arg("pin").toInt(), 0, 48);
   if (web.hasArg("count")) g_settings.ledCount = constrain(web.arg("count").toInt(), 1, 1024);
@@ -294,19 +301,19 @@ void handleRestart() {
 
 // ── dev page: live log – lines captured since ?since=N (0/absent = all) ──
 void handleLogsJson() {
-  uint32_t since = web.hasArg("since") ? (uint32_t)web.arg("since").toInt() : 0;
+  uint32_t since = (*g_srv).hasArg("since") ? (uint32_t)(*g_srv).arg("since").toInt() : 0;
   String out;
   uint32_t dropped = 0;
   logger::since(since, out, dropped);
-  web.send(200, "application/json; charset=utf-8", out);
+  (*g_srv).send(200, "application/json; charset=utf-8", out);
 }
 
 // ── dev page: live log – download the whole buffer as a text file ──
 void handleLogsTxt() {
   String out;
   logger::toText(out);
-  web.sendHeader("Content-Disposition", "attachment; filename=alert-lamp.log");
-  web.send(200, "text/plain; charset=utf-8", out);
+  (*g_srv).sendHeader("Content-Disposition", "attachment; filename=alert-lamp.log");
+  (*g_srv).send(200, "text/plain; charset=utf-8", out);
 }
 
 // ── dev page: live log – drop every captured line ──
@@ -340,7 +347,7 @@ void handleTestFor(WebServer& srv) {
   srv.send(200, "application/json", "{\"ok\":true}");
 }
 
-void handleTest() { handleTestFor(web); }
+void handleTest() { handleTestFor(*g_srv); }
 
 void handleUpdCheck() {
   // Queue the check; the portal loop's ota::tick(false) runs it right after
@@ -961,7 +968,7 @@ void handleSettings() {
 }
 
 void handleDev() {
-  web.send_P(200, "text/html; charset=utf-8", DEV_HTML);
+  (*g_srv).send_P(200, "text/html; charset=utf-8", DEV_HTML);
 }
 
 // ── runtime status UI (served while the lamp runs on WiFi) ──
@@ -1058,6 +1065,7 @@ namespace portal {
 
 void begin() {
   if (runtimeOn) { runtimeWeb.stop(); runtimeOn = false; }
+  g_srv = &web;  // handlers dispatch on the portal server while the AP is up
   LOGI(TAG, "starting configuration access point…");
   WiFi.mode(WIFI_AP_STA);  // STA stays available for /scan and /connect
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
@@ -1098,6 +1106,7 @@ void begin() {
 
 void tick() {
   if (!running) return;
+  g_srv = &web;  // handlers dispatch on the portal server while the AP is up
   dns.processNextRequest();
   web.handleClient();
   static uint32_t idleSince = 0;
@@ -1115,12 +1124,18 @@ void beginRuntime() {
     LOGI(TAG, "configuration portal closed");
   }
 
+  g_srv = &runtimeWeb;  // handlers now dispatch on the running server
+
   static bool routesDone = false;
   if (!routesDone) {
     runtimeWeb.on("/", handleRuntimeRoot);
     runtimeWeb.on("/status", handleRuntimeStatus);
     runtimeWeb.on("/test", handleRuntimeTest);
     runtimeWeb.on("/portal", HTTP_POST, handleRuntimePortal);
+    // Additional routes that also answer while the lamp is running:
+    runtimeWeb.on("/dev", handleDev);
+    runtimeWeb.on("/logs.json", handleLogsJson);
+    runtimeWeb.on("/logs.txt", handleLogsTxt);
     routesDone = true;
   }
 
@@ -1132,6 +1147,7 @@ void beginRuntime() {
 
 void runtimeTick() {
   if (!runtimeOn) return;
+  g_srv = &runtimeWeb;  // handlers dispatch on the runtime server while running
   runtimeWeb.handleClient();
   static uint32_t idleSince = 0;
   dropIdleClient(runtimeWeb, idleSince);
