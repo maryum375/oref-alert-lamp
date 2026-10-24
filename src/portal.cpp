@@ -573,7 +573,7 @@ const char SETUP_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <section class="step" id="step2">
  <h2>2 · אזורי התרעה</h2>
  <div class="hint">לאחר החיבור לרשת – בחר את אזורי ההתרעה.</div>
- <label>חיפוש אזור</label><input id="q" placeholder="למשל: מודיעין" oninput="syncSel();renderAreas($('#list'),this.value);markSelection()">
+ <label>חיפוש אזור</label><input id="q" placeholder="למשל: מודיעין" oninput="renderAreas($('#list'),this.value);markSelection()">
  <div class="actions">
   <button class="ghost" onclick="selectAllVisible(true)">סמן הכול</button>
   <button class="ghost" onclick="selectAllVisible(false)">נקה</button>
@@ -718,7 +718,7 @@ async function init(){
   $('#bri').value=st.led_bri;$('#briv').textContent=st.led_bri;
   // areas
   await loadAreas($('#list'));
-  $('#list').addEventListener('change',()=>{syncSel();updCount();});
+  $('#list').addEventListener('change',()=>{updCount();});
   updCount();
   show((location.hash||'#areas').slice(1));
 }
