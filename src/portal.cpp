@@ -429,7 +429,7 @@ const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
 const jget=async u=>(await fetch(u,{cache:'no-store'})).json();
 function msg(el,t,err){el.textContent=t||'';el.className='msg'+(err?' err':'');}
-function jurl(d){return new URLSearchParams(d).toString();}
+function jurl(d){return new URLSearchParams(d);}
 
 // ── official oref areas list ──
 let SELMAP=new Map(); // label→'p'|'s'|'' (persistent source of truth, survives re-renders)
@@ -493,6 +493,16 @@ function selected(){
   const p=[],s=[];
   SELMAP.forEach((v,l)=>{if(v==='p')p.push(l);else if(v==='s')s.push(l);});
   return {p,s};
+}
+// Sync DOM checkbox/select changes back into SELMAP (the single source of truth).
+function syncSel(){
+  $$('#list input[type=checkbox]').forEach(cb=>{
+    const l=cb.dataset.l;
+    const sel=cb.closest('.row')?.querySelector('select');
+    const v = sel ? sel.value : (cb.checked?'p':'');
+    if(cb.checked && v) SELMAP.set(l,v);
+    else SELMAP.delete(l);
+  });
 }
 function selectAllVisible(on){
   $$('#list input[type=checkbox]').forEach(cb=>{
@@ -861,7 +871,7 @@ const char DEV_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 const $=s=>document.querySelector(s);
 const jget=async u=>(await fetch(u,{cache:'no-store'})).json();
 function msg(el,t,err){el.textContent=t||'';el.className='msg'+(err?' err':'');}
-function jurl(d){return new URLSearchParams(d).toString();}
+function jurl(d){return new URLSearchParams(d);}
 
 async function refresh(){
   try{
@@ -1138,8 +1148,12 @@ void beginRuntime() {
     runtimeWeb.on("/portal", HTTP_POST, handleRuntimePortal);
     // Additional routes that also answer while the lamp is running:
     runtimeWeb.on("/dev", handleDev);
+    runtimeWeb.on("/savedev", handleSaveDev);
     runtimeWeb.on("/logs.json", handleLogsJson);
     runtimeWeb.on("/logs.txt", handleLogsTxt);
+    // Assets shared with the configuration portal while running:
+    runtimeWeb.on("/settings", handleSettings);
+    runtimeWeb.on("/style.css", handleStyle);
     routesDone = true;
   }
 
